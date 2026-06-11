@@ -29,9 +29,32 @@ struct message
     uint32_t msg_type;
 };
 
+int send_bytes(int socketFD, void* src, size_t n);
+int send_message(int socketFD, uint32_t type, void* msg, uint32_t length);
 
-int send_message(int socketFD, uint32_t type, const void* msg, uint32_t length);
+int recv_bytes(int socketFD, void* ptr, size_t n);
 int recv_message(int socketFD, struct message* msg);
+
+
+/*
+    Sends n bytes of the structure pointed to by src to the file descriptor
+
+    returns 0 on success, -1 on error
+*/
+int send_bytes(int socketFD, void* src, size_t n)
+{
+
+    ssize_t writtenBytes = 0;
+    do{
+        ssize_t bytes = send(socketFD, src + writtenBytes, n - writtenBytes, 0);
+        if(bytes < 0) return -1;
+        if(bytes == 0) return -1;
+        writtenBytes += bytes;
+
+    } while(writtenBytes < n);
+
+    return 0;
+}
 
 /*
     Attempts to create & send a message + msg_header to the given socketFD
@@ -41,48 +64,33 @@ int recv_message(int socketFD, struct message* msg);
     Returns 0 if message successfully sent
     Else -1 & sets errno
 */
-int send_message(int socketFD, uint32_t type, const void* msg, uint32_t length)
+int send_message(int socketFD, uint32_t type, void* msg, uint32_t length)
 {
-    if(length >= MAX_MESSAGE_SIZE)  // msg must be MAX_MESSAGE_SIZE - 1, 1 byte reserved for null terminator
+    if(length > MAX_MESSAGE_SIZE)  // msg must be <= MAX_MESSAGE_SIZE, binary protocol, so don't forget to add null term if printing as a string!
     {
         errno = EMSGSIZE;
         return -1;
     }
 
+    int returnCode = 0;
     struct msg_header header;
     header.length = htonl((uint32_t)length);
     header.type = htonl((uint32_t)type);
 
-    // Send the Header
-    ssize_t writtenBytes = 0;
-    while(writtenBytes < sizeof header)
-    {
-        ssize_t bytes = send(socketFD, ((char*)&header) + writtenBytes, sizeof header - writtenBytes, 0);
-        if(bytes < 0)
-        {
-            return -1;
-        }
-        writtenBytes += bytes;
-    }
+    // Send the header struct length (length of msg)
+    returnCode = send_bytes(socketFD, &header.length, sizeof(u_int32_t));
+    if(returnCode != 0) return returnCode;
 
-    printf("Header sent\n");
+    printf("Length sent\n");
 
-    // Send the Message
-    writtenBytes = 0;
-    while(writtenBytes < length)
-    {
-        ssize_t bytes = send(socketFD, ((char*)msg) + writtenBytes, length - writtenBytes, 0);
-        if(bytes < 0)
-        {
-            return -1;
-        }
-        if(bytes == 0)
-        {
-            errno = ECONNRESET;
-            return -1;
-        }
-        writtenBytes += bytes;
-    }
+    // Send the header struct type (type of msg)
+    returnCode = send_bytes(socketFD, &header.type, sizeof(uint32_t));
+    if(returnCode != 0) return returnCode;
+    
+    printf("Type sent\n");
+    // Send the msg
+    returnCode = send_bytes(socketFD, msg, length);
+    if(returnCode != 0) return returnCode;
 
     printf("Message sent\n");
     return 0;
@@ -90,11 +98,50 @@ int send_message(int socketFD, uint32_t type, const void* msg, uint32_t length)
 
 
 
+
+
+/*
+    Reads n bytes to the structure pointed to by dst
+
+    Returns 0 on success, -1 on error
+*/
+int recv_bytes(int socketFD, void* dst, size_t n)
+{
+    int returnCode = 0;
+    char    byteBuffer[n];
+
+    ssize_t readBytes = 0;
+    ssize_t bytesRead = 0;
+
+    do{
+        readBytes = recv(socketFD, byteBuffer + bytesRead, n - bytesRead, 0);
+        if(readBytes < 0)
+        {
+            returnCode = -1;
+            perror("read");
+            goto cleanup;
+        }
+        if(readBytes == 0)
+        {
+            errno = ECONNRESET;
+            returnCode = -1;
+            goto cleanup;
+        }
+
+        bytesRead += readBytes;
+    }while(bytesRead < n);
+
+    memcpy(dst, byteBuffer, n);
+    cleanup:
+    return returnCode;
+}
+
 /*
     Reads a socket for the following...
-    1. Reads a byte stream to construect a msg_header object
-    2. Reads a byte stream for a message
-    3. Uses the msg_header + message to fill out the msg field passed in
+    1. Reads a byte stream for the length of payload
+    2. Reads a byte stream for the type of payload
+    3. Reads a byte stream for the payload
+    4. Uses the payload + length + type to fill in a msg object passed in
 
     Returns 0 on Success
     -1 on error, sets errno
@@ -102,78 +149,43 @@ int send_message(int socketFD, uint32_t type, const void* msg, uint32_t length)
 int recv_message(int socketFD, struct message* msg)
 {
     int returnCode = 0;
-    char    readBuffer[MAX_MESSAGE_SIZE];
-    char    messageHeaderBuffer[sizeof(struct msg_header)];
+    uint32_t msg_header_length_n, msg_header_type_n, msg_header_length_h, msg_header_type_h = 0;
 
-    // Recv the header
-    ssize_t readBytes = 0;
-    ssize_t byteLength = 0;
-    do
-    {
-        readBytes = read(socketFD, &readBuffer + byteLength, sizeof (struct msg_header) - byteLength);
-        if(readBytes < 0)
-        {
-            returnCode = -1;
-            perror("read");
-            goto cleanup;
-        }
-        if(readBytes == 0)
-        {
-            errno = ECONNRESET;
-            return -1;
-        }
+    // Recv the header length
+    returnCode = recv_bytes(socketFD, &msg_header_length_n, sizeof(uint32_t));
+    if(returnCode != 0) return returnCode;
 
-        memcpy(messageHeaderBuffer + byteLength, &readBuffer, readBytes);
-        byteLength += readBytes;
-    } while (byteLength < sizeof(struct msg_header));
+    printf("Header length received\n");
 
-    printf("Header received\n");
-    messageHeaderBuffer[byteLength] = '\0';
+    msg_header_length_h = ntohl(msg_header_length_n);
 
-    struct msg_header* header = (struct msg_header*)messageHeaderBuffer;
+    // Recv the header type
+    returnCode = recv_bytes(socketFD, &msg_header_type_n, sizeof(uint32_t));
+    if(returnCode != 0) return returnCode;
 
-    // convert header fields from network byte order 
-    uint32_t header_length = ntohl(header->length);
-    uint32_t header_type = ntohl(header->type);
-    printf("Header Length: %u, Header Type: %u\n", header_length, header_type);
+    printf("Header type received\n");
 
-    if(header_length >= MAX_MESSAGE_SIZE)
+    msg_header_type_h = ntohl(msg_header_type_n);
+
+    if(msg_header_length_h > MAX_MESSAGE_SIZE) // msg must be <= MAX_MESSAGE_SIZE, binary protocol, so don't forget to add null term if printing as a string!
     {
         errno = EMSGSIZE;
         returnCode = -1;
-        goto cleanup;
+        return returnCode;
     }
 
-    // Recv the message
-    memset(&readBuffer, '\0', sizeof readBuffer);
-    char    messageBuffer[MAX_MESSAGE_SIZE];
-    readBytes = 0;
-    byteLength = 0;
-    do
-    {
-        readBytes = read(socketFD, &readBuffer, MAX_MESSAGE_SIZE - 1);
-        if(readBytes < 0)
-        {
-            returnCode = -1;
-            perror("read");
-            goto cleanup;
-        }
+    char messageBuffer[msg_header_length_h];
 
-        if(readBytes == 0)
-        {
-            returnCode = -1;
-            errno = ECONNRESET;
-            goto cleanup;
-        }
-        memcpy(&messageBuffer + byteLength, &readBuffer, readBytes);
-        byteLength += readBytes;
-    } while(byteLength < header_length);
-    messageBuffer[byteLength] = '\0';
+    // Recv the msg
+    returnCode = recv_bytes(socketFD, &messageBuffer, msg_header_length_h);
+    if(returnCode != 0) return returnCode;
 
 
-    memcpy(msg->msg, messageBuffer, byteLength);
-    msg->msg_length = header_length;
-    msg->msg_type = header_type;
+    // Fill in msg object
+    memcpy(msg->msg, messageBuffer, msg_header_length_h);
+    msg->msg[msg_header_length_h] = '\0';
+    msg->msg_length = msg_header_length_h;
+    msg->msg_type = msg_header_type_h;
 
     cleanup:
     return returnCode;
