@@ -1,0 +1,16 @@
+1. Why do you need message framing over TCP?
+    When sending messages through sockets, its not guranteed that all the bytes required to construct an object on the other end will be included
+    in one packet. Message framing solves this issue since the header will tell you how many bytes will be sent that corresponds to an object for reconstruction
+
+2. What is network byte order 
+    Network byte order are bytes ordered in big endian order. Some hardware does little endian so its important to standardize it
+
+3. Why should payload length be bounded?
+    Payload length should be bounded so that the other size knows how much space to reserve to store the payload
+
+4. What happens if a peer lies about message length?
+    If a peer lies about message length it could lead to a buffer overflow on the otherend which could have issues ranges from crashes to malicious injections
+
+5. Why is sizeof(struct) risky for network protocols?
+    Due to compiler optimizations, it is not guranteed that both ends will always agree on the size of a struct. Meaning that if one side has optimizations on and the other doesn't,
+    the sizeof(struct) could return two different values, which would cause issues for reconstruction on the other end.
